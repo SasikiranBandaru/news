@@ -1,0 +1,147 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'java17'
+        nodejs 'node16'
+    }
+
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/SasikiranBandaru/news.git'
+            }
+        }
+
+        stage('Sonarqube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''
+                        rm -rf .scannerwork
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=Game \
+                        -Dsonar.projectKey=Game
+                    '''
+                }
+            }
+        }
+
+        stage("Quality Gate") {
+            steps {
+                waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh 'npm install'
+            }
+        }
+
+        stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DC'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh 'trivy fs . > trivyfs.txt'
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh 'docker build -t 2048 .'
+                        sh 'docker tag 2048 sasikiran450/2048:latest'
+                        sh 'docker push sasikiran450/2048:latest'
+                    }
+                }
+            }
+        }
+
+        stage('TRIVY Image Scan') {
+            steps {
+                sh 'trivy image sasikiran450/2048:latest > trivy.txt'
+            }
+        }
+
+        stage('Deploy to Container') {
+            steps {
+                sh 'docker rm -f 2048 || true'
+                sh 'docker run -d --name 2048 -p 3000:3000 sasikiran450/2048:latest'
+            }
+        }
+
+        // UNCOMMENT BELOW STAGE IF K8s CLUSTER IS REACHABLE
+
+        // stage('Generate Kubernetes YAML') {
+        //     steps {
+        //         script {
+        //             def deploymentYaml = """
+        // apiVersion: apps/v1
+        // kind: Deployment
+        // metadata:
+        //   name: game-deployment
+        // spec:
+        //   replicas: 1
+        //   selector:
+        //     matchLabels:
+        //       app: game
+        //   template:
+        //     metadata:
+        //       labels:
+        //         app: game
+        //     spec:
+        //       containers:
+        //       - name: game
+        //         image: sasikiran450/2048:latest
+        //         ports:
+        //         - containerPort: 3000
+        // ---
+        // apiVersion: v1
+        // kind: Service
+        // metadata:
+        //   name: game-service
+        // spec:
+        //   selector:
+        //     app: game
+        //   ports:
+        //   - protocol: TCP
+        //     port: 80
+        //     targetPort: 3000
+        //   type: LoadBalancer
+        //             """
+        //             writeFile file: 'deployment.yaml', text: deploymentYaml
+        //         }
+        //     }
+        // }
+
+        // stage('Deploy to Kubernetes') {
+        //     steps {
+        //         withKubeConfig(credentialsId: 'k8s') {
+        //             sh 'kubectl apply -f deployment.yaml --validate=false'
+        //         }
+        //     }
+        // }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '*.txt', allowEmptyArchive: true
+        }
+    }
+}
